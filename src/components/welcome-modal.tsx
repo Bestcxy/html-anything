@@ -59,7 +59,7 @@ const VENDOR_HINT: Record<string, { gradient: string; install: string }> = {
   },
   Moonshot: {
     gradient: "from-[#0ea5e9] to-[#1e3a8a]",
-    install: "npm i -g @moonshot-ai/kimi-cli  ·  kimi login",
+    install: "uv tool install kimi-cli  ·  kimi login",
   },
   Inflection: {
     gradient: "from-[#a855f7] to-[#ec4899]",

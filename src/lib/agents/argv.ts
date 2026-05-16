@@ -17,7 +17,7 @@ export class UnsupportedAgentProtocolError extends Error {
   constructor(public readonly agent: string, public readonly protocol: string) {
     super(
       `${agent} uses the ${protocol} protocol, which is not yet wired up in this build. ` +
-        `Pick one of: claude / codex / cursor-agent / gemini / copilot / opencode / qwen / qoder / deepseek / aider.`,
+        `Pick one of: claude / codex / cursor-agent / gemini / copilot / opencode / qwen / qoder / deepseek / aider / kimi.`,
     );
   }
 }
@@ -136,8 +136,17 @@ export function buildArgv(agent: string, _opts: AgentArgvOpts = {}): string[] {
       // there's no `-` stdin sentinel. invoke.ts appends opts.prompt at
       // spawn time, so we leave the trailing slot empty here.
       return ["exec", "--auto", ...(model ? ["--model", model] : [])];
-    case "hermes":
     case "kimi":
+      // Kimi print mode: invoke.ts appends `-p <prompt>` (or stdin for huge
+      // prompts). One JSON object per run on stdout.
+      return [
+        "--print",
+        "--yolo",
+        "--output-format",
+        "stream-json",
+        ...(model ? ["--model", model] : []),
+      ];
+    case "hermes":
     case "devin":
     case "kiro":
     case "kilo":
@@ -379,6 +388,15 @@ function parseLineWithState(agent: string, line: string, state: ParseState): Age
     if (typeof obj.message === "string") out.push({ kind: "delta", text: obj.message });
   }
 
+  if (agent === "kimi") {
+    // Kimi print mode: one JSON object per run, e.g.
+    // {"role":"assistant","content":"..."}
+    if (obj.role === "assistant" && typeof obj.content === "string") {
+      out.push({ kind: "delta", text: obj.content });
+    }
+    if (typeof obj.text === "string") out.push({ kind: "delta", text: obj.text });
+  }
+
   if (agent === "qoder") {
     // Qoder's stream-json output mirrors claude's envelope shape (init/system,
     // stream_event with content_block_delta/text_delta, assistant message,
@@ -421,6 +439,33 @@ function parseLineWithState(agent: string, line: string, state: ParseState): Age
   }
 
   return out;
+}
+
+/** Pull assistant text from Kimi print-mode stdout (JSON lines or one blob). */
+export function extractKimiAssistantText(stdout: string): string | null {
+  const trimmed = stdout.trim();
+  if (!trimmed) return null;
+  for (const line of trimmed.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    try {
+      const obj = JSON.parse(t) as { role?: string; content?: string };
+      if (obj.role === "assistant" && typeof obj.content === "string" && obj.content) {
+        return obj.content;
+      }
+    } catch {
+      // try next line
+    }
+  }
+  try {
+    const obj = JSON.parse(trimmed) as { role?: string; content?: string };
+    if (obj.role === "assistant" && typeof obj.content === "string" && obj.content) {
+      return obj.content;
+    }
+  } catch {
+    // not JSON
+  }
+  return null;
 }
 
 /** Back-compat shim for callers that just want plain text. */

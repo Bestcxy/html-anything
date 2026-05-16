@@ -10,7 +10,7 @@ import path, { delimiter, join } from "node:path";
  *   - "argv-message" : prompt goes via `--message <text>` (openclaw); stdout is
  *                      a single multi-line JSON document (not ndjson), parsed
  *                      after the child closes.
- *   - "acp"          : ACP JSON-RPC over stdio (hermes/kimi/devin/kiro/kilo/vibe).
+ *   - "acp"          : ACP JSON-RPC over stdio (hermes/devin/kiro/kilo/vibe).
  *                      Not implemented in this build — surfaced in detection so
  *                      the user sees install instructions, but invoke emits a
  *                      clear error pointing them to a supported agent.
@@ -206,6 +206,21 @@ export const AGENTS: AgentDef[] = [
       { id: "deepseek/deepseek-chat", label: "deepseek/deepseek-chat" },
     ],
   },
+  {
+    // Kimi Code CLI — print mode + stream-json on stdout (not `kimi acp`).
+    // invoke.ts passes the prompt via `-p` (stdin is unreliable when spawned).
+    id: "kimi",
+    label: "Kimi CLI",
+    bin: "kimi",
+    envOverride: "KIMI_BIN",
+    vendor: "Moonshot",
+    fallbackModels: [
+      DEFAULT_MODEL,
+      { id: "kimi-k2-turbo-preview", label: "kimi-k2-turbo-preview" },
+      { id: "moonshot-v1-8k", label: "moonshot-v1-8k" },
+      { id: "moonshot-v1-32k", label: "moonshot-v1-32k" },
+    ],
+  },
 
   // ACP family — detection-only. Models still surfaced for UI completeness.
   {
@@ -219,20 +234,6 @@ export const AGENTS: AgentDef[] = [
       DEFAULT_MODEL,
       { id: "openai-codex:gpt-5.5", label: "gpt-5.5 (openai-codex)" },
       { id: "openai-codex:gpt-5.4", label: "gpt-5.4 (openai-codex)" },
-    ],
-  },
-  {
-    id: "kimi",
-    label: "Kimi CLI",
-    bin: "kimi",
-    envOverride: "KIMI_BIN",
-    vendor: "Moonshot",
-    protocol: "acp",
-    fallbackModels: [
-      DEFAULT_MODEL,
-      { id: "kimi-k2-turbo-preview", label: "kimi-k2-turbo-preview" },
-      { id: "moonshot-v1-8k", label: "moonshot-v1-8k" },
-      { id: "moonshot-v1-32k", label: "moonshot-v1-32k" },
     ],
   },
   {

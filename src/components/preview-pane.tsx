@@ -58,8 +58,9 @@ export function PreviewPane({
   // as Convert produces real html, never written to task state.
   const [templateExample, setTemplateExample] = useState<string>("");
   useEffect(() => {
-    // only fetch when there's no real output yet AND the run is idle
-    if (html || status === "running") {
+    // Only fetch example.html while idle *before* a convert. After done/error
+    // with empty html, falling back to the sample looks like a bogus "result".
+    if (html || status !== "idle") {
       setTemplateExample("");
       return;
     }
@@ -130,8 +131,8 @@ export function PreviewPane({
   // Effective html for this render = real task output if any, else the
   // template example fetched above. Downstream (deck detection, debounce,
   // iframe srcDoc) treats both identically — the only difference is provenance.
-  const effectiveHtml = html || templateExample;
-  const isPreviewingTemplate = !html && !!templateExample;
+  const effectiveHtml = html || (status === "idle" ? templateExample : "");
+  const isPreviewingTemplate = !html && status === "idle" && !!templateExample;
 
   // Detect deck off the cleaned (un-fenced) html — extract once for reuse.
   const cleaned = useMemo(() => extractHtml(effectiveHtml), [effectiveHtml]);

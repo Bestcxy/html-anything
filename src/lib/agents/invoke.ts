@@ -5,7 +5,13 @@ import { writeFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveOnPath, resolveOpenclawAgentId, AGENTS } from "./detect";
-import { buildArgv, envFor, makeParser, UnsupportedAgentProtocolError } from "./argv";
+import {
+  buildArgv,
+  envFor,
+  extractKimiAssistantText,
+  makeParser,
+  UnsupportedAgentProtocolError,
+} from "./argv";
 
 export type InvokeOpts = {
   agent: string;
@@ -106,6 +112,11 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
   const env = envFor(opts.agent);
   const promptViaArgv = def.protocol === "argv";
   const promptViaMessageFlag = def.protocol === "argv-message";
+  /** Kimi reliably reads `-p`; stdin-only mode is kept for very large prompts. */
+  const KIMI_PROMPT_ARGV_MAX = 96 * 1024;
+  const kimiUsesArgvPrompt =
+    opts.agent === "kimi" &&
+    Buffer.byteLength(opts.prompt, "utf8") <= KIMI_PROMPT_ARGV_MAX;
 
   return new ReadableStream<InvokeEvent>({
     async start(controller) {
@@ -175,17 +186,20 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       // `protocol: "argv-message"` (openclaw today) wants the prompt under
       // an explicit `--message <text>` flag.
       if (promptViaMessageFlag) argv = [...argv, "--message", opts.prompt];
+      if (kimiUsesArgvPrompt) argv = [...argv, "-p", opts.prompt];
+      if (opts.agent === "kimi" && !kimiUsesArgvPrompt) {
+        argv = [...argv, "--input-format", "text"];
+      }
 
       const aiderUsesMessageFile = opts.agent === "aider";
+      const ignoreStdin = aiderUsesMessageFile || kimiUsesArgvPrompt;
       try {
         child = spawn(bin!, argv, {
           cwd: opts.cwd ?? process.cwd(),
           env,
-          // Aider reads the prompt from --message-file; leaving stdin as a
-          // pipe makes it warn "Input is not a terminal (fd=0)".
-          stdio: aiderUsesMessageFile
-            ? ["ignore", "pipe", "pipe"]
-            : ["pipe", "pipe", "pipe"],
+          // Aider reads the prompt from --message-file; Kimi reads `-p`.
+          // Leaving stdin as a pipe makes them warn "Input is not a terminal".
+          stdio: ignoreStdin ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
           // On Windows, `spawn` cannot launch a `.cmd` / `.bat` shim (which is
           // what npm installs for most CLI agents) without going through the
           // shell. Without this, every agent invocation fails with
@@ -211,12 +225,12 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         promptBytes: Buffer.byteLength(opts.prompt, "utf8"),
       });
 
-      if (!aiderUsesMessageFile) {
+      if (!ignoreStdin) {
         child.stdin.on("error", () => {});
         try {
           // stdin-protocol agents read the prompt from stdin; argv / argv-message
-          // agents already have it on the command line.
-          if (!promptViaArgv && !promptViaMessageFlag) {
+          // / kimi `-p` agents already have it on the command line.
+          if (!promptViaArgv && !promptViaMessageFlag && !kimiUsesArgvPrompt) {
             child.stdin.write(opts.prompt);
           }
           child.stdin.end();
@@ -226,6 +240,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       // One parser per spawn so cross-line dedupe state (sawStreamEventText)
       // is scoped to this single invocation and doesn't leak across runs.
       const parse = makeParser(opts.agent);
+      let kimiEmittedText = false;
 
       let stdoutBuf = "";
       child.stdout.setEncoding("utf8");
@@ -241,8 +256,10 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
           stdoutBuf = stdoutBuf.slice(nl + 1);
           if (!line) continue;
           for (const part of parse(line)) {
-            if (part.kind === "delta") safeEnqueue({ type: "delta", text: part.text });
-            else if (part.kind === "html") safeEnqueue({ type: "html", text: part.text });
+            if (part.kind === "delta") {
+              if (opts.agent === "kimi") kimiEmittedText = true;
+              safeEnqueue({ type: "delta", text: part.text });
+            } else if (part.kind === "html") safeEnqueue({ type: "html", text: part.text });
             else if (part.kind === "meta") safeEnqueue({ type: "meta", key: part.key, value: part.value });
             else safeEnqueue({ type: "raw", text: line.slice(0, 240) });
           }
@@ -314,9 +331,21 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
           }
         } else if (stdoutBuf) {
           for (const part of parse(stdoutBuf)) {
-            if (part.kind === "delta") safeEnqueue({ type: "delta", text: part.text });
-            else if (part.kind === "html") safeEnqueue({ type: "html", text: part.text });
+            if (part.kind === "delta") {
+              if (opts.agent === "kimi") kimiEmittedText = true;
+              safeEnqueue({ type: "delta", text: part.text });
+            } else if (part.kind === "html") safeEnqueue({ type: "html", text: part.text });
             else if (part.kind === "meta") safeEnqueue({ type: "meta", key: part.key, value: part.value });
+          }
+          if (opts.agent === "kimi" && !kimiEmittedText) {
+            const text = extractKimiAssistantText(stdoutBuf);
+            if (text) safeEnqueue({ type: "delta", text });
+            else if (!stdoutBuf.trim().startsWith("{")) {
+              safeEnqueue({
+                type: "error",
+                message: "Kimi returned no assistant content — check `kimi login` and model config",
+              });
+            }
           }
           if (opts.agent === "aider" || opts.agent === "deepseek") {
             safeEnqueue({ type: "delta", text: stdoutBuf });
@@ -340,11 +369,16 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
 
 /** Benign CLI noise when spawned without a TTY (HTML Anything uses pipes). */
 function shouldDropAgentStderr(agent: string, chunk: string): boolean {
-  if (agent !== "aider") return false;
-  return (
-    /Input is not a terminal/i.test(chunk) ||
-    /Detected dumb terminal/i.test(chunk)
-  );
+  if (agent === "aider") {
+    return (
+      /Input is not a terminal/i.test(chunk) ||
+      /Detected dumb terminal/i.test(chunk)
+    );
+  }
+  if (agent === "kimi") {
+    return /To resume this session:/i.test(chunk);
+  }
+  return false;
 }
 
 function errorStream(message: string): ReadableStream<InvokeEvent> {
