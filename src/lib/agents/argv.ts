@@ -9,6 +9,8 @@ export type AgentArgvOpts = {
    * for resolving this via `resolveOpenclawAgentId` before calling buildArgv.
    */
   openclawAgentId?: string;
+  /** Absolute path written by invoke.ts for aider's --message-file. */
+  aiderMessageFile?: string;
 };
 
 export class UnsupportedAgentProtocolError extends Error {
@@ -94,15 +96,30 @@ export function buildArgv(agent: string, _opts: AgentArgvOpts = {}): string[] {
       ];
     case "qwen":
       return ["--yolo", ...(model ? ["--model", model] : []), "-"];
-    case "aider":
+    case "aider": {
+      const messageFile = _opts.aiderMessageFile;
+      if (!messageFile) {
+        throw new Error("aider requires aiderMessageFile (invoke.ts writes a temp prompt file)");
+      }
       return [
         "--no-pretty",
         "--no-stream",
         "--yes-always",
+        "--no-gitignore",
+        "--no-show-release-notes",
+        "--no-git",
+        "--no-auto-commits",
+        "--map-tokens",
+        "0",
+        // HTML generation never needs URL scraping; --yes-always would
+        // otherwise auto-install Playwright + Chromium on every URL hit.
+        "--no-detect-urls",
+        "--disable-playwright",
         "--message-file",
-        "-",
+        messageFile,
         ...(model ? ["--model", model] : []),
       ];
+    }
     case "qoder":
       // Qoder CLI mirrors `claude -p`'s shape: print mode + stream-json + yolo
       // for non-interactive approval. Prompt arrives via stdin (handled in
@@ -136,6 +153,7 @@ export function buildArgv(agent: string, _opts: AgentArgvOpts = {}): string[] {
 export function envFor(agent: string): NodeJS.ProcessEnv {
   const base = { ...process.env };
   if (agent === "gemini") base.GEMINI_CLI_TRUST_WORKSPACE = "true";
+  if (agent === "aider") base.AIDER_DISABLE_PLAYWRIGHT = "1";
   return base;
 }
 

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import path, { delimiter, join } from "node:path";
 
@@ -197,6 +197,7 @@ export const AGENTS: AgentDef[] = [
     id: "aider",
     label: "Aider",
     bin: "aider",
+    envOverride: "AIDER_BIN",
     vendor: "Aider",
     fallbackModels: [
       DEFAULT_MODEL,
@@ -337,6 +338,25 @@ function userToolchainDirs(): string[] {
     if (appData) dirs.push(join(appData, "npm"));
   } else {
     dirs.push("/opt/homebrew/bin", "/usr/local/bin");
+    // pip install --user on macOS → ~/Library/Python/3.x/bin
+    const pyRoot = join(home, "Library/Python");
+    if (existsSync(pyRoot)) {
+      try {
+        for (const ver of readdirSync(pyRoot)) {
+          dirs.push(join(pyRoot, ver, "bin"));
+        }
+      } catch {
+        // ignore unreadable dirs
+      }
+    }
+    // Common conda / miniconda layouts (GUI-launched Node often lacks conda on PATH)
+    const condaPrefix = env.CONDA_PREFIX?.trim();
+    if (condaPrefix) dirs.push(join(condaPrefix, "bin"));
+    dirs.push(
+      join(home, "miniconda3/bin"),
+      join(home, "anaconda3/bin"),
+      join(home, "micromamba/bin"),
+    );
   }
   return dirs;
 }

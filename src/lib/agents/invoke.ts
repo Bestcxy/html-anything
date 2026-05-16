@@ -1,5 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
+import { writeFile, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { resolveOnPath, resolveOpenclawAgentId, AGENTS } from "./detect";
 import { buildArgv, envFor, makeParser, UnsupportedAgentProtocolError } from "./argv";
 
@@ -107,6 +111,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
     async start(controller) {
       let closed = false;
       let child: ChildProcessWithoutNullStreams | null = null;
+      let aiderPromptFile: string | undefined;
 
       const safeEnqueue = (ev: InvokeEvent) => {
         if (closed) return;
@@ -116,9 +121,15 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
           closed = true;
         }
       };
+      const cleanupAiderPrompt = () => {
+        if (!aiderPromptFile) return;
+        void unlink(aiderPromptFile).catch(() => {});
+        aiderPromptFile = undefined;
+      };
       const safeClose = () => {
         if (closed) return;
         closed = true;
+        cleanupAiderPrompt();
         try {
           controller.close();
         } catch {}
@@ -135,6 +146,14 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         };
         if (opts.agent === "openclaw") {
           argvOpts.openclawAgentId = await resolveOpenclawAgentId(bin!);
+        }
+        if (opts.agent === "aider") {
+          aiderPromptFile = join(
+            tmpdir(),
+            `html-anything-aider-${randomBytes(8).toString("hex")}.txt`,
+          );
+          await writeFile(aiderPromptFile, opts.prompt, "utf8");
+          argvOpts.aiderMessageFile = aiderPromptFile;
         }
         argv = buildArgv(opts.agent, argvOpts);
       } catch (err) {
@@ -157,11 +176,16 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       // an explicit `--message <text>` flag.
       if (promptViaMessageFlag) argv = [...argv, "--message", opts.prompt];
 
+      const aiderUsesMessageFile = opts.agent === "aider";
       try {
         child = spawn(bin!, argv, {
           cwd: opts.cwd ?? process.cwd(),
           env,
-          stdio: ["pipe", "pipe", "pipe"],
+          // Aider reads the prompt from --message-file; leaving stdin as a
+          // pipe makes it warn "Input is not a terminal (fd=0)".
+          stdio: aiderUsesMessageFile
+            ? ["ignore", "pipe", "pipe"]
+            : ["pipe", "pipe", "pipe"],
           // On Windows, `spawn` cannot launch a `.cmd` / `.bat` shim (which is
           // what npm installs for most CLI agents) without going through the
           // shell. Without this, every agent invocation fails with
@@ -187,13 +211,17 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         promptBytes: Buffer.byteLength(opts.prompt, "utf8"),
       });
 
-      child.stdin.on("error", () => {});
-      try {
-        // stdin-protocol agents read the prompt from stdin; argv / argv-message
-        // agents already have it on the command line.
-        if (!promptViaArgv && !promptViaMessageFlag) child.stdin.write(opts.prompt);
-        child.stdin.end();
-      } catch {}
+      if (!aiderUsesMessageFile) {
+        child.stdin.on("error", () => {});
+        try {
+          // stdin-protocol agents read the prompt from stdin; argv / argv-message
+          // agents already have it on the command line.
+          if (!promptViaArgv && !promptViaMessageFlag) {
+            child.stdin.write(opts.prompt);
+          }
+          child.stdin.end();
+        } catch {}
+      }
 
       // One parser per spawn so cross-line dedupe state (sawStreamEventText)
       // is scoped to this single invocation and doesn't leak across runs.
@@ -223,6 +251,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
 
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => {
+        if (shouldDropAgentStderr(opts.agent, chunk)) return;
         safeEnqueue({ type: "stderr", text: chunk });
       });
 
@@ -307,6 +336,15 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
     },
     cancel() {},
   });
+}
+
+/** Benign CLI noise when spawned without a TTY (HTML Anything uses pipes). */
+function shouldDropAgentStderr(agent: string, chunk: string): boolean {
+  if (agent !== "aider") return false;
+  return (
+    /Input is not a terminal/i.test(chunk) ||
+    /Detected dumb terminal/i.test(chunk)
+  );
 }
 
 function errorStream(message: string): ReadableStream<InvokeEvent> {

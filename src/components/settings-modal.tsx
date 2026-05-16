@@ -165,7 +165,12 @@ function AgentSection() {
       const data = (await res.json()) as { agents: AgentInfo[] };
       setAgents(data.agents);
       const installed = data.agents.filter((a) => a.available);
-      if (!installed.find((a) => a.id === selected) && installed.length) {
+      const hasOverride = !!(selected && agentBinOverrides[selected]?.trim());
+      if (
+        !installed.find((a) => a.id === selected) &&
+        !hasOverride &&
+        installed.length
+      ) {
         setSelectedAgent(installed[0].id);
       }
     } catch (e) {
@@ -182,7 +187,7 @@ function AgentSection() {
 
   const installed = useMemo(() => agents.filter((a) => a.available), [agents]);
   const missing = useMemo(() => agents.filter((a) => !a.available), [agents]);
-  const selectedAgent = installed.find((a) => a.id === selected);
+  const selectedAgent = agents.find((a) => a.id === selected);
   const selectedModelId = selected ? agentModels[selected] ?? "default" : "default";
 
   return (
@@ -253,7 +258,12 @@ function AgentSection() {
           </div>
           <div className="grid grid-cols-1 gap-2">
             {missing.map((a) => (
-              <MissingCard key={a.id} agent={a} />
+              <MissingCard
+                key={a.id}
+                agent={a}
+                selected={selected === a.id}
+                onClick={() => setSelectedAgent(a.id)}
+              />
             ))}
           </div>
         </>
@@ -532,13 +542,27 @@ function CustomBinPath({
   );
 }
 
-function MissingCard({ agent }: { agent: AgentInfo }) {
+function MissingCard({
+  agent,
+  selected,
+  onClick,
+}: {
+  agent: AgentInfo;
+  selected?: boolean;
+  onClick?: () => void;
+}) {
   const t = useT();
   const gradient = VENDOR_GRADIENT[agent.vendor] ?? "from-[var(--ink-faint)] to-[var(--ink-mute)]";
   return (
-    <div
-      className="flex items-center gap-3 rounded-xl p-3 opacity-70"
-      style={{ background: "var(--paper)", border: "1px solid var(--line-faint)" }}
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full items-center gap-3 rounded-xl p-3 text-left transition-all hover:opacity-100"
+      style={{
+        background: selected ? "var(--surface)" : "var(--paper)",
+        border: selected ? "1.5px solid var(--ink)" : "1px solid var(--line-faint)",
+        opacity: selected ? 1 : 0.85,
+      }}
     >
       <div
         className={`shrink-0 grid h-8 w-8 place-items-center rounded-lg text-white text-[13px] font-semibold bg-gradient-to-br ${gradient}`}
@@ -552,7 +576,7 @@ function MissingCard({ agent }: { agent: AgentInfo }) {
       <span className="text-[10px] uppercase tracking-wider text-[var(--ink-faint)]">
         {t("agent.notInstalled")}
       </span>
-    </div>
+    </button>
   );
 }
 
